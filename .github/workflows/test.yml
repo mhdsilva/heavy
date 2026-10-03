@@ -49,6 +49,18 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bin"
           ln -s /bin/bash "$RUNNER_TEMP/bin/bash"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: debug nice
+        continue-on-error: true
+        run: |
+          set -x
+          command -v nice; type nice
+          perl -e 'print "base=", getpriority(0, 0), "\n"'
+          nice -n 10 perl -e 'print "direct=", getpriority(0, 0), "\n"'
+          /usr/bin/nice -n 10 perl -e 'print "abs=", getpriority(0, 0), "\n"'
+          nice -n 10 sh -c 'perl -e "print qq(via-sh=), getpriority(0, 0), qq(\n)"'
+          ( nice -n 10 perl -e 'print "bg=", getpriority(0, 0), "\n"' ) &
+          wait
+          bash -x ./heavy perl -e 'print "heavy=", getpriority(0, 0), "\n"' 2>&1 | tail -15
       - name: perl fallback (stock macOS)
         run: |
           bash --version | head -1
