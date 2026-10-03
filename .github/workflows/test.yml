@@ -1,0 +1,61 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck -S warning heavy tests/run.sh
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: flock + ionice
+        run: tests/run.sh
+      - name: perl fallback, no flock or ionice
+        run: |
+          sudo mv /usr/bin/flock /usr/bin/flock.off
+          sudo mv /usr/bin/ionice /usr/bin/ionice.off
+          tests/run.sh
+
+  bash-3_2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash 3.2 (busybox flock, then perl, then neither)
+        run: |
+          docker run --rm -v "$PWD:/r" -w /r bash:3.2 sh -euc '
+            apk add --no-cache -q perl procps
+            echo "== flock"; bash tests/run.sh
+            rm -f /usr/bin/flock /bin/flock
+            echo "== perl"; bash tests/run.sh
+            rm -f /usr/bin/perl
+            echo "== no flock, no perl"
+            set +e; out=$(bash heavy sh -c "echo ran; exit 5" 2>/dev/null); rc=$?; set -e
+            [ "$out" = ran ] && [ $rc -eq 5 ] && echo "PASS runs without a queue"
+          '
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use the system bash 3.2, not Homebrew's
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -s /bin/bash "$RUNNER_TEMP/bin/bash"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: perl fallback (stock macOS)
+        run: |
+          bash --version | head -1
+          if command -v flock; then brew uninstall --ignore-dependencies flock; fi
+          ! command -v flock
+          tests/run.sh
+      - name: brew flock
+        run: |
+          brew install flock
+          tests/run.sh
