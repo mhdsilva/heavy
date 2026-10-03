@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# <usage>
 # heavy — machine-wide queue for heavy verification commands (pytest, vitest,
 # tsc, pyright, lint, build).
 #
@@ -27,6 +28,7 @@
 #   CPU/RAM   cap shared by all jobs, via the systemd user slice heavy.slice,
 #             written by --install where systemd --user works (Linux; WSL2 only
 #             with systemd enabled in /etc/wsl.conf). Not available on macOS.
+# </usage>
 set -u
 
 # Real path of this script, following symlinks (~/.local/bin/heavy points here).
@@ -42,10 +44,13 @@ done
 self="$(cd "$(dirname "$self")" && pwd)/$(basename "$self")"
 
 usage() {
-  sed -n '2,32p' "$self" | sed 's/^# \{0,1\}//' >&2
+  # Bounded by the <usage> markers, not by line numbers that rot on every edit.
+  sed -n '/^# <usage>$/,/^# <\/usage>$/p' "$self" | sed '1d;$d;s/^# \{0,1\}//' >&2
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+is_positive_int() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -gt 0 ]; }
 
 cpu_count() {
   getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4
@@ -133,10 +138,28 @@ default_slots() {
 
 base="${HEAVY_LOCK:-$(default_lock)}"
 slots="${HEAVY_SLOTS:-$(default_slots)}"
+if ! is_positive_int "$slots"; then
+  echo "[heavy] warning: HEAVY_SLOTS='$slots' is not a positive integer; using $(default_slots)" >&2
+  slots="$(default_slots)"
+fi
 wait_max="${HEAVY_WAIT:-1800}"
+if ! is_positive_int "$wait_max"; then
+  echo "[heavy] warning: HEAVY_WAIT='$wait_max' is not a positive integer; using 1800" >&2
+  wait_max=1800
+fi
 
 # Slot 0 is $base itself; the others are $base.N.
 slot_path() { if [ "$1" -eq 0 ]; then echo "$base"; else echo "$base.$1"; fi; }
+
+# The queue is only usable if the lock file can actually be created. A bad
+# HEAVY_LOCK (missing directory, read-only, full /tmp) must not make heavy spin
+# until HEAVY_WAIT; without a lock it runs the command unqueued, exactly like
+# when flock and perl are both missing.
+lock_ok() {
+  { exec 9>>"$base"; } 2>/dev/null || return 1
+  exec 9>&-
+  return 0
+}
 
 # Non-blocking lock on fd 9. flock(2) locks belong to the open file, so perl
 # locking the fd it inherited keeps the lock held by this shell after perl exits.
@@ -153,6 +176,10 @@ lock_fd9() {
 status() {
   local i p
   echo "slots: $slots, lock: $base"
+  if ! lock_ok; then
+    echo "  lock unavailable (bad HEAVY_LOCK or permissions); queue is off"
+    return 0
+  fi
   for ((i = 0; i < slots; i++)); do
     p="$(slot_path "$i")"
     exec 9>>"$p"
@@ -185,6 +212,11 @@ if [ $# -eq 0 ]; then
   exit 2
 fi
 
+if [ -n "$timeout_s" ] && ! is_positive_int "$timeout_s"; then
+  echo "[heavy] --timeout needs a positive integer number of seconds" >&2
+  exit 2
+fi
+
 # Already inside a heavy (e.g. `heavy make check` calling `heavy pytest`): don't
 # take a second slot, or it can deadlock waiting on itself.
 if [ -n "${HEAVY_HELD:-}" ]; then
@@ -207,6 +239,8 @@ try_slots() {
 
 if ! have flock && ! have perl; then
   echo "[heavy] warning: no flock or perl; running without the queue" >&2
+elif ! lock_ok; then
+  echo "[heavy] warning: cannot open lock '$base'; running without the queue" >&2
 elif ! try_slots; then
   echo "[heavy] queued; slots held by:" >&2
   for ((i = 0; i < slots; i++)); do
@@ -241,9 +275,20 @@ fi
 # exec'ing, so signalling only the direct child would orphan the real work.
 # (A new process group would be simpler, but a background group reading the
 # terminal gets stopped by SIGTTIN.)
+# Children of a pid. pgrep(1) is the fast path; ps is the portable fallback,
+# so a system without pgrep still stops the whole tree instead of leaking
+# orphans (busybox and stock macOS both have ps -o).
+child_pids() {
+  if have pgrep; then
+    pgrep -P "$1" 2>/dev/null
+  else
+    ps -A -o pid= -o ppid= 2>/dev/null | awk -v p="$1" '$2 == p { print $1 }'
+  fi
+}
+
 descendants() {
   local c
-  for c in $(pgrep -P "$1" 2>/dev/null); do
+  for c in $(child_pids "$1"); do
     descendants "$c"
     echo "$c"
   done

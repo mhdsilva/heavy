@@ -46,6 +46,7 @@ Behavior worth knowing:
 - **Put the timeout inside.** Use `heavy --timeout 600 cmd`, not `timeout 600 heavy cmd`, because the outer form spends the timeout waiting in the queue. The built-in timeout exits 124, like coreutils `timeout`, and also works on macOS, which doesn't ship `timeout`.
 - **Exit codes pass through.** heavy adds only 75 (gave up waiting) and 124 (timed out).
 - **Nesting is safe.** `heavy make check` calling `heavy pytest` inside takes one slot, not two, so it can't deadlock on itself.
+- **Bad values fail safe.** A non-numeric `--timeout` is rejected (`exit 2`); an invalid `HEAVY_SLOTS`/`HEAVY_WAIT` falls back to the default with a warning; an unusable `HEAVY_LOCK` runs the command unqueued instead of spinning.
 - **Signals reach the whole command.** Ctrl-C, `kill` or the timeout stop the command and its child processes, and leave no orphans running in the background.
 - **Don't wrap things that don't exit.** A dev server or a file watcher would hold its slot forever.
 

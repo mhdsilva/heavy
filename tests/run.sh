@@ -10,6 +10,23 @@ ok() { echo "PASS $1"; }
 ko() { echo "FAIL $1: $2"; fail=1; }
 has_proc() { ps -A -o args= 2>/dev/null | grep -q "^$1"; }
 
+# A PATH with everything except pgrep, so heavy takes its ps fallback.
+nopgrep_path() {
+  local d dir f b
+  d="$(mktemp -d "$T/np.XXXXXX")"
+  for dir in $(printf '%s' "$PATH" | tr ':' ' '); do
+    [ -d "$dir" ] || continue
+    for f in "$dir"/*; do
+      [ -e "$f" ] || continue
+      b="${f##*/}"
+      [ "$b" = pgrep ] && continue
+      [ -e "$d/$b" ] || ln -s "$f" "$d/$b" 2>/dev/null
+    done
+  done
+  ln -sf "$(command -v bash)" "$d/bash" 2>/dev/null
+  printf '%s' "$d"
+}
+
 echo "bash $BASH_VERSION | flock:$(command -v flock >/dev/null && echo y || echo n) perl:$(command -v perl >/dev/null && echo y || echo n) ionice:$(command -v ionice >/dev/null && echo y || echo n)"
 
 # Two slots: A and B start together, C waits for one of them.
@@ -54,6 +71,12 @@ HEAVY_SLOTS=1 HEAVY_WAIT=2 "$H" true 2>/dev/null; r=$?
 "$H" sh -c 'sleep 34; true' & p=$!; sleep 0.5; kill -TERM $p; wait $p 2>/dev/null; sleep 0.5
 has_proc 'sleep 34' && ko "TERM forwarding" "orphan left" || ok "TERM forwarding"
 
+# Without pgrep, the ps fallback still stops the whole tree (no orphan).
+np="$(nopgrep_path)"
+PATH="$np" "$H" sh -c 'sleep 35; true' & p=$!; sleep 0.5
+kill -TERM $p; wait $p 2>/dev/null; sleep 0.5
+has_proc 'sleep 35' && ko "TERM without pgrep" "orphan left" || ok "TERM without pgrep"
+
 # Low priority: niceness 10 above the caller's (nice is relative; GitHub's macOS
 # runners start at -10). getpriority() reads the kernel's value, where the
 # output of `ps -o nice=` differs between procps and BSD ps.
@@ -68,6 +91,28 @@ fi
 HEAVY_SLOTS=1 "$H" sleep 2 & p=$!; sleep 0.5
 HEAVY_SLOTS=1 "$H" --status | grep -q 'sleep 2' && ok "--status" || ko "--status" "$(HEAVY_SLOTS=1 "$H" --status)"
 wait $p
+
+# --help prints the header and nothing from the code below it.
+h=$("$H" --help 2>&1)
+case "$h" in
+  *"set -u"*|*"Real path of this script"*) ko "--help" "leaked code";;
+  *"machine-wide queue"*) ok "--help";;
+  *) ko "--help" "no header";;
+esac
+
+# A non-numeric --timeout is rejected, not turned into an instant timeout.
+"$H" --timeout abc true 2>/dev/null; r=$?
+[ $r -eq 2 ] && ok "--timeout rejects non-numeric" || ko "--timeout invalid" "rc=$r"
+
+# Bad HEAVY_SLOTS/HEAVY_WAIT fall back instead of crashing or hanging.
+HEAVY_SLOTS=abc "$H" sh -c 'exit 0' 2>/dev/null; r=$?
+[ $r -eq 0 ] && ok "HEAVY_SLOTS invalid falls back" || ko "HEAVY_SLOTS invalid" "rc=$r"
+HEAVY_WAIT=abc "$H" sh -c 'exit 0' 2>/dev/null; r=$?
+[ $r -eq 0 ] && ok "HEAVY_WAIT invalid falls back" || ko "HEAVY_WAIT invalid" "rc=$r"
+
+# An unreachable lock runs the command unqueued rather than spinning.
+out=$(HEAVY_LOCK="$T/nope/l" HEAVY_WAIT=3 "$H" echo ran 2>/dev/null); r=$?
+[ "$out" = ran ] && [ $r -eq 0 ] && ok "unreachable lock runs without queue" || ko "unreachable lock" "rc=$r out=$out"
 
 pkill -f 'sleep 8' 2>/dev/null
 rm -rf "$T"
