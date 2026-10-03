@@ -54,8 +54,11 @@ HEAVY_SLOTS=1 HEAVY_WAIT=2 "$H" true 2>/dev/null; r=$?
 "$H" sh -c 'sleep 34; true' & p=$!; sleep 0.5; kill -TERM $p; wait $p 2>/dev/null; sleep 0.5
 has_proc 'sleep 34' && ko "TERM forwarding" "orphan left" || ok "TERM forwarding"
 
-# Low priority.
-n=$("$H" sh -c 'ps -o nice= -p $$' | tr -d ' '); [ "$n" = 10 ] && ok "nice 10" || ko "nice" "$n"
+# Low priority. getpriority() reads the kernel's value; `ps -o nice=` differs
+# between procps and BSD ps.
+if command -v perl >/dev/null; then
+  n=$("$H" perl -e 'print getpriority(0, 0)'); [ "$n" = 10 ] && ok "nice 10" || ko "nice" "$n"
+fi
 
 # --status names the holder.
 HEAVY_SLOTS=1 "$H" sleep 2 & p=$!; sleep 0.5
