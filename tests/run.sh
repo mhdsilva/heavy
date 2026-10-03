@@ -54,10 +54,14 @@ HEAVY_SLOTS=1 HEAVY_WAIT=2 "$H" true 2>/dev/null; r=$?
 "$H" sh -c 'sleep 34; true' & p=$!; sleep 0.5; kill -TERM $p; wait $p 2>/dev/null; sleep 0.5
 has_proc 'sleep 34' && ko "TERM forwarding" "orphan left" || ok "TERM forwarding"
 
-# Low priority. getpriority() reads the kernel's value; `ps -o nice=` differs
-# between procps and BSD ps.
+# Low priority: niceness 10 above the caller's (nice is relative; GitHub's macOS
+# runners start at -10). getpriority() reads the kernel's value, where the
+# output of `ps -o nice=` differs between procps and BSD ps.
 if command -v perl >/dev/null; then
-  n=$("$H" perl -e 'print getpriority(0, 0)'); [ "$n" = 10 ] && ok "nice 10" || ko "nice" "$n"
+  base=$(perl -e 'print getpriority(0, 0)')
+  want=$(( base + 10 > 19 ? 19 : base + 10 ))
+  n=$("$H" perl -e 'print getpriority(0, 0)')
+  [ "$n" = "$want" ] && ok "nice +10 ($base -> $n)" || ko "nice" "base=$base got=$n want=$want"
 fi
 
 # --status names the holder.
